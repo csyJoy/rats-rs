@@ -1,5 +1,5 @@
 use super::{
-    as_raw, as_raw_mut, ossl_init, SslMode, TlsFlags, VerifyCertExtension, OPENSSL_EX_DATA_IDX,
+    as_raw, as_raw_mut, ossl_init, GetFd, SslMode, TcpWrapper, TlsFlags, VerifyCertExtension, OPENSSL_EX_DATA_IDX
 };
 use crate::cert::dice::cbor::parse_evidence_buffer_with_tag;
 use crate::crypto::{DefaultCrypto, HashAlgo};
@@ -14,7 +14,7 @@ use pkcs8::EncodePrivateKey;
 use std::cell::Cell;
 use std::ffi::c_int;
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::os::fd::AsRawFd;
 use std::ptr;
 use std::sync::{Arc, Mutex};
@@ -26,7 +26,7 @@ struct Server {
     conf_flag: TlsFlags,
     verify: SSL_verify_cb,
     attester: AutoAttester,
-    stream: TcpStream,
+    stream: Box<dyn GetFd>,
 }
 
 impl VerifyCertExtension for Server {
@@ -54,7 +54,7 @@ impl VerifyCertExtension for Server {
 struct TlsServerBuilder {
     verify: SSL_verify_cb,
     conf_flag: Option<TlsFlags>,
-    stream: Option<TcpStream>,
+    stream: Box<dyn GetFd>,
 }
 
 impl TlsServerBuilder {
@@ -65,7 +65,7 @@ impl TlsServerBuilder {
             verify: self.verify,
             conf_flag: self.conf_flag.unwrap_or_default(),
             attester: AutoAttester::new(),
-            stream: self.stream.unwrap(),
+            stream: self.stream,
         };
         s.init()?;
         Ok(s)
@@ -78,9 +78,11 @@ impl TlsServerBuilder {
         self.conf_flag = Some(conf_flag);
         self
     }
-    fn with_tcp_stream(mut self, stream: TcpStream) -> Self {
-        self.stream = Some(stream);
-        self
+    fn with_tcp_stream<A: ToSocketAddrs>(mut self, addr: A) -> Result<Self> {
+        let stream = TcpStream::connect(addr)
+            .map_err(|err| Error::kind(ErrorKind::OsslClientConnectFail))?;
+        self.stream = Box::new(TcpWrapper(stream));
+        Ok(self)
     }
 }
 
@@ -170,7 +172,7 @@ impl GenericSecureTransPort for Server {
                 OPENSSL_EX_DATA_IDX.lock().unwrap().get(),
                 as_raw_mut(self),
             );
-            let res = SSL_set_fd(session, self.stream.as_raw_fd());
+            let res = SSL_set_fd(session, self.stream.get_fd());
             if res != 1 {
                 return Err(Error::kind(ErrorKind::OsslSetFdFail));
             }

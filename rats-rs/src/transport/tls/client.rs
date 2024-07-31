@@ -22,7 +22,10 @@ use openssl_sys::*;
 use pkcs8::EncodePrivateKey;
 
 use super::ossl_init;
+use super::GetFd;
+use super::GetFdDumpImpl;
 use super::SslMode;
+use super::TcpWrapper;
 use super::TlsFlags;
 use super::OPENSSL_EX_DATA_IDX;
 use super::{as_raw, as_raw_mut, VerifyCertExtension};
@@ -35,25 +38,25 @@ struct Client {
     verifier: AutoVerifier,
     verify: SSL_verify_cb,
     conf_flag: TlsFlags,
-    stream: TcpStream,
+    stream: Box<dyn GetFd>,
 }
 
 #[allow(dead_code)]
 struct TlsClientBuilder {
     verify: SSL_verify_cb,
+    stream: Box<dyn GetFd>,
 }
 
 #[allow(dead_code)]
-impl TlsClientBuilder {
-    fn build<A: ToSocketAddrs>(self, addr: A) -> Result<Client> {
+impl TlsClientBuilder{
+    fn build(self) -> Result<Client> {
         let mut c = Client {
             ctx: None,
             ssl_session: None,
             verifier: AutoVerifier::new(),
             verify: self.verify,
             conf_flag: TlsFlags::default(),
-            stream: TcpStream::connect(addr)
-                .map_err(|_| Error::kind(ErrorKind::OsslClientConnectFail))?,
+            stream: self.stream,
         };
         c.init()?;
         Ok(c)
@@ -61,6 +64,18 @@ impl TlsClientBuilder {
     fn with_verify(mut self, verify: SSL_verify_cb) -> Self {
         self.verify = verify;
         self
+    }
+    fn with_tcp_stream<A: ToSocketAddrs>(mut self, addr: A) -> Result<Self> {
+        let stream = TcpStream::connect(addr)
+            .map_err(|err| Error::kind(ErrorKind::OsslClientConnectFail))?;
+        self.stream = Box::new(TcpWrapper(stream));
+        Ok(self)
+    }
+    fn new() -> Self {
+        Self {
+            verify: None,
+            stream: Box::new(GetFdDumpImpl{}),
+        }
     }
 }
 
@@ -177,7 +192,7 @@ impl GenericSecureTransPort for Client {
                 OPENSSL_EX_DATA_IDX.lock().unwrap().get(),
                 as_raw_mut(self),
             );
-            let res = SSL_set_fd(session, self.stream.as_raw_fd());
+            let res = SSL_set_fd(session, self.stream.get_fd());
             if res != 1 {
                 return Err(Error::kind(ErrorKind::OsslSetFdFail));
             }

@@ -4,6 +4,8 @@ use libc::c_int;
 use openssl_sys::*;
 use pkcs8::ObjectIdentifier;
 use std::cell::Cell;
+use std::net::TcpStream;
+use std::os::fd::AsRawFd;
 use std::ptr;
 use std::slice;
 use std::sync::Arc;
@@ -28,6 +30,26 @@ lazy_static! {
             None,
         ))))
     };
+}
+
+trait GetFd{
+    fn get_fd(&self) -> i32;
+}
+
+struct GetFdDumpImpl;
+
+impl GetFd for GetFdDumpImpl {
+    fn get_fd(&self) -> i32{
+        0
+    }
+}
+
+struct TcpWrapper(TcpStream);
+
+impl GetFd for TcpWrapper {
+    fn get_fd(&self) -> i32 {
+        self.0.as_raw_fd()
+    }
 }
 
 #[inline]
