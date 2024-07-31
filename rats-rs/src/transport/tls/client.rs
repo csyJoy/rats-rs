@@ -228,6 +228,10 @@ impl Client {
                 pkey = key.to_pkcs8_der().map_err(|_e| Error::unknown())?;
                 epkey = EpvPkey::RSA.bits();
             }
+            AsymmetricPrivateKey::P256(key) => {
+                pkey = key.to_pkcs8_der()?;
+                epkey = EpvPkey::EC.bits();
+            }
             _ => return Err(Error::kind(ErrorKind::OsslUnsupportedPkeyAlgo)),
         }
         let ctx = 
