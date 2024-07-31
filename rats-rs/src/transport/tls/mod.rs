@@ -71,8 +71,34 @@ bitflags! {
         const PRIV_KEY = (1 << 28) + 7;
         const CERT = (1 << 28) + 8;
         const UNKNOWN = (1 << 28) + 9;
-
     }
+
+    #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    struct SslInit : u64 {
+        const LOAD_CRYPTO_STRINGS = 0x0000_0002;
+        const ADD_ALL_CIPHERS = 0x0000_0004;
+        const ADD_ALL_DIGESTS = 0x0000_0008;
+        const LOAD_SSL_STRINGS = 0x0020_0000;
+    }
+}
+
+pub fn ossl_init() -> Result<()> {
+    unsafe {
+        OPENSSL_init_crypto(
+            SslInit::ADD_ALL_DIGESTS.bits() | SslInit::ADD_ALL_DIGESTS.bits(),
+            ptr::null(),
+        );
+        OPENSSL_init_ssl(
+            SslInit::LOAD_SSL_STRINGS.bits() | SslInit::LOAD_CRYPTO_STRINGS.bits(),
+            ptr::null(),
+        );
+        OPENSSL_init_crypto(SslInit::LOAD_CRYPTO_STRINGS.bits(), ptr::null());
+        OPENSSL_init_crypto(SslInit::ADD_ALL_DIGESTS.bits(), ptr::null());
+        if OPENSSL_init_ssl(0, ptr::null()) < 0 {
+            return Err(Error::kind(ErrorKind::OsslInitializeFail));
+        }
+    }
+    Ok(())
 }
 
 trait VerifyCertExtension {
@@ -175,3 +201,4 @@ fn find_extension_from_cert(
         Err(Error::kind(ErrorKind::OsslFindX509ExFail))
     }
 }
+

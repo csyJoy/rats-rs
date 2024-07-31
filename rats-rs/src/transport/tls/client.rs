@@ -21,6 +21,7 @@ use maybe_async::maybe_async;
 use openssl_sys::*;
 use pkcs8::EncodePrivateKey;
 
+use super::ossl_init;
 use super::SslMode;
 use super::TlsFlags;
 use super::OPENSSL_EX_DATA_IDX;
@@ -54,7 +55,7 @@ impl TlsClientBuilder {
             stream: TcpStream::connect(addr)
                 .map_err(|_| Error::kind(ErrorKind::OsslClientConnectFail))?,
         };
-        c.init();
+        c.init()?;
         Ok(c)
     }
     fn with_verify(mut self, verify: SSL_verify_cb) -> Self {
@@ -194,11 +195,14 @@ impl GenericSecureTransPort for Client {
 }
 
 impl Client {
-    pub fn init(&mut self) {
-        openssl_sys::init();
-        unsafe {
-            let ctx = openssl_sys::SSL_CTX_new(openssl_sys::TLS_server_method());
+    pub fn init(&mut self) -> Result<()> {
+        ossl_init()?;
+        let ctx = unsafe { openssl_sys::SSL_CTX_new(openssl_sys::TLS_server_method()) };
+        if ctx.is_null() {
+            return Err(Error::kind(ErrorKind::OsslCtxInitializeFail));
         }
+        self.ctx = Some(ctx);
+        Ok(())
     }
     pub fn use_privkey(&mut self, privkey: AsymmetricPrivateKey) -> Result<()> {
         let pkey;

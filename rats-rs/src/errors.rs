@@ -96,6 +96,8 @@ pub enum ErrorKind {
 
     OsslReceiveFail,
 
+    OsslInitializeFail,
+
     Unknown,
 }
 

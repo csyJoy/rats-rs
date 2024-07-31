@@ -1,4 +1,6 @@
-use super::{as_raw, as_raw_mut, SslMode, TlsFlags, VerifyCertExtension, OPENSSL_EX_DATA_IDX};
+use super::{
+    as_raw, as_raw_mut, ossl_init, SslMode, TlsFlags, VerifyCertExtension, OPENSSL_EX_DATA_IDX,
+};
 use crate::cert::dice::cbor::parse_evidence_buffer_with_tag;
 use crate::crypto::{DefaultCrypto, HashAlgo};
 use crate::errors::*;
@@ -187,16 +189,15 @@ impl GenericSecureTransPort for Server {
 
 impl Server {
     pub fn init(&mut self) -> Result<()> {
-        init();
-        unsafe {
-            let ctx = SSL_CTX_new(TLS_server_method());
-            if ctx.is_null() {
-                return Err(Error::kind(ErrorKind::OsslCtxInitializeFail));
-            }
-            self.ctx = Some(ctx);
+        ossl_init()?;
+        let ctx = unsafe { SSL_CTX_new(TLS_server_method()) };
+        if ctx.is_null() {
+            return Err(Error::kind(ErrorKind::OsslCtxInitializeFail));
         }
+        self.ctx = Some(ctx);
         Ok(())
     }
+
     pub fn use_privkey(&mut self, privkey: AsymmetricPrivateKey) -> Result<()> {
         let pkey;
         let epkey: ::libc::c_int;
