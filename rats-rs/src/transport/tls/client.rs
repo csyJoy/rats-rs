@@ -23,21 +23,9 @@ use pkcs8::EncodePrivateKey;
 
 use super::SslMode;
 use super::TlsFlags;
+use super::OPENSSL_EX_DATA_IDX;
 use super::{as_raw, as_raw_mut, VerifyCertExtension};
 use lazy_static::lazy_static;
-
-lazy_static! {
-    static ref OPENSSL_EX_DATA_IDX: Arc<Mutex<Cell<i32>>> = unsafe {
-        Arc::new(Mutex::new(Cell::new(CRYPTO_get_ex_new_index(
-            4,
-            0,
-            ptr::null_mut(),
-            None,
-            None,
-            None,
-        ))))
-    };
-}
 
 #[allow(dead_code)]
 struct Client {
