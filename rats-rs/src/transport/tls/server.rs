@@ -1,5 +1,5 @@
 use super::{
-    as_raw, as_raw_mut, ossl_init, GetFd, SslMode, TcpWrapper, TlsFlags, VerifyCertExtension, OPENSSL_EX_DATA_IDX
+    as_raw, as_raw_mut, ossl_init, EpvPkey, GetFd, SslMode, TcpWrapper, TlsFlags, VerifyCertExtension, OPENSSL_EX_DATA_IDX
 };
 use crate::cert::dice::cbor::parse_evidence_buffer_with_tag;
 use crate::crypto::{DefaultCrypto, HashAlgo};
@@ -207,8 +207,8 @@ impl Server {
             AsymmetricPrivateKey::Rsa2048(key)
             | AsymmetricPrivateKey::Rsa3072(key)
             | AsymmetricPrivateKey::Rsa4096(key) => {
-                pkey = key.to_pkcs8_der().map_err(|_e| Error::unknown())?;
-                epkey = 19;
+                pkey = key.to_pkcs8_der()?;
+                epkey = EpvPkey::RSA.bits();
             }
             _ => return Err(Error::kind(ErrorKind::OsslUnsupportedPkeyAlgo)),
         }

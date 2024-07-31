@@ -22,6 +22,7 @@ use openssl_sys::*;
 use pkcs8::EncodePrivateKey;
 
 use super::ossl_init;
+use super::EpvPkey;
 use super::GetFd;
 use super::GetFdDumpImpl;
 use super::SslMode;
@@ -225,7 +226,7 @@ impl Client {
             | AsymmetricPrivateKey::Rsa3072(key)
             | AsymmetricPrivateKey::Rsa4096(key) => {
                 pkey = key.to_pkcs8_der().map_err(|_e| Error::unknown())?;
-                epkey = 19;
+                epkey = EpvPkey::RSA.bits();
             }
             _ => return Err(Error::kind(ErrorKind::OsslUnsupportedPkeyAlgo)),
         }

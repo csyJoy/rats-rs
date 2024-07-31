@@ -102,6 +102,12 @@ bitflags! {
         const ADD_ALL_DIGESTS = 0x0000_0008;
         const LOAD_SSL_STRINGS = 0x0020_0000;
     }
+
+    #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    struct EpvPkey : i32 {
+        const EC = 408;
+        const RSA = 6;
+    }
 }
 
 pub fn ossl_init() -> Result<()> {
