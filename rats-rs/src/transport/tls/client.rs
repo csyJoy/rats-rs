@@ -164,11 +164,9 @@ impl GenericSecureTransPortRead for Client {
 #[maybe_async]
 impl GenericSecureTransPort for Client {
     async fn negotiate(&mut self) -> Result<()> {
-        let ctx = as_raw_mut(
+        let ctx = 
             self.ctx
-                .as_mut()
-                .ok_or(Error::kind(ErrorKind::OsslCtxUninitialize))?,
-        );
+                .ok_or(Error::kind(ErrorKind::OsslCtxUninitialize))?;
         unsafe {
             if self.verify.is_some() {
                 let mut mode = SslMode::SSL_VERIFY_NONE;
@@ -231,11 +229,9 @@ impl Client {
             }
             _ => return Err(Error::kind(ErrorKind::OsslUnsupportedPkeyAlgo)),
         }
-        let ctx = as_raw_mut(
+        let ctx = 
             self.ctx
-                .as_mut()
-                .ok_or(Error::kind(ErrorKind::OsslCtxUninitialize))?,
-        );
+                .ok_or(Error::kind(ErrorKind::OsslCtxUninitialize))?;
         let pkey_len = pkey.as_bytes().len() as ::libc::c_long;
         let pkey_buffer = as_raw(&pkey.as_bytes()[0]);
         unsafe {
@@ -246,12 +242,10 @@ impl Client {
         }
         Ok(())
     }
-    pub fn use_cert(&mut self, cert: Vec<u8>) -> Result<()> {
-        let ctx = as_raw_mut(
+    pub fn use_cert(&mut self, cert: &Vec<u8>) -> Result<()> {
+        let ctx = 
             self.ctx
-                .as_mut()
-                .ok_or(Error::kind(ErrorKind::OsslCtxUninitialize))?,
-        );
+                .ok_or(Error::kind(ErrorKind::OsslCtxUninitialize))?;
         unsafe {
             let ptr = cert.as_ptr();
             let len = cert.len();

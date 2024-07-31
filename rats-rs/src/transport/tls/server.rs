@@ -212,11 +212,9 @@ impl Server {
             }
             _ => return Err(Error::kind(ErrorKind::OsslUnsupportedPkeyAlgo)),
         }
-        let ctx = as_raw_mut(
-            self.ctx
-                .as_mut()
-                .ok_or(Error::kind(ErrorKind::OsslCtxUninitialize))?,
-        );
+        let ctx = self
+            .ctx
+            .ok_or(Error::kind(ErrorKind::OsslCtxUninitialize))?;
         let pkey_len = pkey.as_bytes().len() as ::libc::c_long;
         let pkey_buffer = as_raw(&pkey.as_bytes()[0]);
         unsafe {
@@ -227,23 +225,22 @@ impl Server {
         }
         Ok(())
     }
-    pub fn use_cert(&mut self, cert: Vec<u8>) -> Result<()> {
-        let ctx = as_raw_mut(
-            self.ctx
-                .as_mut()
-                .ok_or(Error::kind(ErrorKind::OsslCtxUninitialize))?,
-        );
-        unsafe {
-            let ptr = cert.as_ptr();
-            let len = cert.len();
-            let res = SSL_CTX_use_certificate_ASN1(
+
+    pub fn use_cert(&mut self, cert: &Vec<u8>) -> Result<()> {
+        let ctx = self
+            .ctx
+            .ok_or(Error::kind(ErrorKind::OsslCtxUninitialize))?;
+        let ptr = cert.as_ptr();
+        let len = cert.len();
+        let res = unsafe {
+            SSL_CTX_use_certificate_ASN1(
                 ctx,
                 len as ::libc::c_int,
                 ptr as usize as *const ::libc::c_uchar,
-            );
-            if res != 1 {
-                return Err(Error::kind(ErrorKind::OsslUseCertfail));
-            }
+            )
+        };
+        if res != 1 {
+            return Err(Error::kind(ErrorKind::OsslUseCertfail));
         }
         Ok(())
     }
