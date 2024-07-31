@@ -268,4 +268,119 @@ impl Client {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::Client;
+    use crate::cert::create::CertBuilder;
+    use crate::crypto::{AsymmetricAlgo, DefaultCrypto, HashAlgo};
+    use crate::errors::*;
+    use crate::tee::AutoAttester;
+    use crate::transport::GenericSecureTransPortWrite;
+    use crate::{tee::AutoVerifier, transport::tls::TlsFlags};
+    use openssl_sys::*;
+    use std::ptr;
+    use std::slice;
+    use crate::transport::tls::{as_raw, as_raw_mut, GetFdDumpImpl};
+
+    #[test]
+    fn test_client_init() -> Result<()> {
+        let mut c = Client {
+            ctx: None,
+            ssl_session: None,
+            verifier: AutoVerifier::new(),
+            verify: None,
+            conf_flag: TlsFlags::default(),
+            stream: Box::new(GetFdDumpImpl),
+        };
+        c.init()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_client_shutdown() -> Result<()> {
+        let mut c = Client {
+            ctx: None,
+            ssl_session: None,
+            verifier: AutoVerifier::new(),
+            verify: None,
+            conf_flag: TlsFlags::default(),
+            stream: Box::new(GetFdDumpImpl),
+        };
+        c.init()?;
+        c.shutdown()?;
+        Ok(())
+    }
+
+    fn ossl_get_privkey(c: &mut Client) -> Vec<u8> {
+        let ssl_session = unsafe { SSL_new(c.ctx.unwrap()) };
+        let pkey = unsafe { SSL_get_privatekey(ssl_session) };
+        let bio = unsafe { BIO_new(BIO_s_mem()) };
+        let res = unsafe {
+            PEM_write_bio_PrivateKey(
+                bio,
+                pkey,
+                ptr::null(),
+                ptr::null_mut(),
+                0,
+                None,
+                ptr::null_mut(),
+            )
+        };
+        assert_ne!(res, 0);
+        let mut pem_data = ptr::null_mut::<i8>();
+        let pem_size = unsafe { BIO_get_mem_data(bio, as_raw_mut(&mut pem_data)) };
+        let now = unsafe { slice::from_raw_parts(pem_data as *const u8, pem_size as usize).to_vec() };
+        unsafe {
+            SSL_shutdown(ssl_session);
+            SSL_free(ssl_session);
+        }
+        now
+    }
+
+    #[test]
+    fn test_client_use_key() -> Result<()> {
+        let mut c = Client {
+            ctx: None,
+            ssl_session: None,
+            verifier: AutoVerifier::new(),
+            verify: None,
+            conf_flag: TlsFlags::default(),
+            stream: Box::new(GetFdDumpImpl),
+        };
+        c.init()?;
+        let privkey = DefaultCrypto::gen_private_key(AsymmetricAlgo::Rsa2048)?;
+        let binding = privkey.to_pkcs8_pem()?;
+        let privpem = binding.as_bytes();
+        c.use_privkey(privkey)?;
+        let now = ossl_get_privkey(&mut c);
+        assert_eq!(privpem, now);
+        c.shutdown()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_client_use_cert() -> Result<()> {
+        let mut c = Client {
+            ctx: None,
+            ssl_session: None,
+            verifier: AutoVerifier::new(),
+            verify: None,
+            conf_flag: TlsFlags::default(),
+            stream: Box::new(GetFdDumpImpl),
+        };
+        c.init()?;
+        let privkey = DefaultCrypto::gen_private_key(AsymmetricAlgo::Rsa2048)?;
+        let cert =CertBuilder::new(AutoAttester::new(), HashAlgo::Sha256).build_with_private_key(&privkey)?.cert_to_der()?;
+        c.use_cert(&cert)?;
+        let raw_cert = unsafe {
+            SSL_CTX_get0_certificate(c.ctx.unwrap())
+        };
+        let mut raw_ptr = ptr::null_mut::<u8>();
+        let len = unsafe {
+            i2d_X509(raw_cert, &mut raw_ptr as *mut *mut u8)
+        };
+        let now = unsafe {slice::from_raw_parts(raw_ptr as *const u8, len as usize).to_vec()};
+        assert_eq!(cert, now);
+        c.shutdown()?;
+        Ok(())
+    }
+}

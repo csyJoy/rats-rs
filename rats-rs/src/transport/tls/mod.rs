@@ -230,3 +230,17 @@ fn find_extension_from_cert(
     }
 }
 
+#[cfg(test)]
+mod test {
+    use super::ossl_init;
+    use crate::errors::*;
+
+    #[test]
+    fn test_ossl_init() -> Result<()> {
+        ossl_init()?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_extension_from_cert() {}
+}
