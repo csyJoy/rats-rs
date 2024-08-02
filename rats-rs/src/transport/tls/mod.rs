@@ -14,6 +14,12 @@ use std::sync::Once;
 
 use crate::cert::dice::extensions::OID_TCG_DICE_ENDORSEMENT_MANIFEST;
 use crate::cert::dice::extensions::OID_TCG_DICE_TAGGED_EVIDENCE;
+use crate::cert::verify::verify_cert_der;
+use crate::cert::verify::CertVerifier;
+use crate::cert::verify::VerifiyPolicy;
+use crate::cert::verify::VerifiyPolicy::Contains;
+use crate::cert::verify::VerifyPolicyOutput;
+use crate::tee::claims::Claims;
 
 use super::{Error, ErrorKind, Result};
 
@@ -145,56 +151,37 @@ extern "C" fn verify_certificate_default<T: VerifyCertExtension>(
     preverify_ok: libc::c_int,
     ctx: *mut X509_STORE_CTX,
 ) -> libc::c_int {
-    let this = unsafe {
-        let cert_store = X509_STORE_CTX_get0_store(ctx);
-        X509_STORE_get_ex_data(cert_store, OPENSSL_EX_DATA_IDX.lock().unwrap().get())
-    };
-    let cert = unsafe { X509_STORE_CTX_get_current_cert(ctx) };
-    if this.is_null() {
-        log::error!("failed to get tls_wrapper_ctx pointer\n");
-        return 0;
-    }
     if preverify_ok == 0 {
         let err = unsafe { X509_STORE_CTX_get_error(ctx) };
-        if err == 18 {
+        if err == X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT {
             return 1;
         }
-        log::error!("Failed on pre-verification due to {}\n", err);
-        if err == 9 {
-            log::error!(
+        error!("Failed on pre-verification due to {}\n", err);
+        if err == X509_V_ERR_CERT_NOT_YET_VALID {
+            error!(
                 "Please ensure check the time-keeping is consistent between client and server\n"
             );
         }
         return 0;
     }
-    let pubkey = unsafe { X509_get_pubkey(cert) };
-    if pubkey.is_null() {
-        log::error!("Unable to decode the public key from certificate\n");
-        return TlsErr::INVALID.bits();
+    let raw_cert = unsafe { X509_STORE_CTX_get_current_cert(ctx) };
+    let mut raw_ptr = ptr::null_mut::<u8>();
+    let len = unsafe { i2d_X509(raw_cert, &mut raw_ptr as *mut *mut u8) };
+    let now = unsafe { slice::from_raw_parts(raw_ptr as *const u8, len as usize) };
+    let res = CertVerifier::new(Contains(Claims::new())).verify(now);
+    match res {
+        Ok(VerifyPolicyOutput::Passed) => {
+            return 1;
+        }
+        Ok(VerifyPolicyOutput::Failed) => {
+            error!("Verify failed because of claims");
+            return 0;
+        }
+        Err(err) => {
+            error!("Verify failed with err: {:?}", err);
+            return 0;
+        }
     }
-    let pubkey_buffer_size = unsafe { i2d_PUBKEY(pubkey, ptr::null_mut()) };
-    let mut pubkey_buffer = vec![0u8; pubkey_buffer_size as usize];
-    let mut p = pubkey_buffer.as_mut_ptr();
-    unsafe {
-        i2d_PUBKEY(pubkey, as_raw_mut(&mut p));
-        EVP_PKEY_free(pubkey);
-    }
-    let evidence = find_extension_from_cert(cert, OID_TCG_DICE_TAGGED_EVIDENCE, true);
-    if evidence.is_err() {
-        return 0;
-    }
-    let endorsement = find_extension_from_cert(cert, OID_TCG_DICE_ENDORSEMENT_MANIFEST, true);
-    if endorsement.is_err() {
-        return 0;
-    }
-    unsafe {
-        (*(this as *mut T)).verify_certificate_extension(
-            pubkey_buffer,
-            evidence.unwrap(),
-            endorsement.unwrap(),
-        );
-    }
-    1
 }
 
 fn find_extension_from_cert(
