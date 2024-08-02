@@ -10,6 +10,7 @@ use std::ptr;
 use std::slice;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::Once;
 
 use crate::cert::dice::extensions::OID_TCG_DICE_ENDORSEMENT_MANIFEST;
 use crate::cert::dice::extensions::OID_TCG_DICE_TAGGED_EVIDENCE;
@@ -32,7 +33,9 @@ lazy_static! {
     };
 }
 
-trait GetFd{
+static START: Once = Once::new();
+
+trait GetFd {
     fn get_fd(&self) -> i32;
 }
 
@@ -111,7 +114,7 @@ bitflags! {
 }
 
 pub fn ossl_init() -> Result<()> {
-    unsafe {
+    START.call_once(|| unsafe {
         OPENSSL_init_crypto(
             SslInit::ADD_ALL_DIGESTS.bits() | SslInit::ADD_ALL_DIGESTS.bits(),
             ptr::null(),
@@ -122,9 +125,9 @@ pub fn ossl_init() -> Result<()> {
         );
         OPENSSL_init_crypto(SslInit::LOAD_CRYPTO_STRINGS.bits(), ptr::null());
         OPENSSL_init_crypto(SslInit::ADD_ALL_DIGESTS.bits(), ptr::null());
-        if OPENSSL_init_ssl(0, ptr::null()) < 0 {
-            return Err(Error::kind(ErrorKind::OsslInitializeFail));
-        }
+    });
+    if unsafe { OPENSSL_init_ssl(0, ptr::null()) } < 0 {
+        return Err(Error::kind(ErrorKind::OsslInitializeFail));
     }
     Ok(())
 }
