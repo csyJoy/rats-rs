@@ -1,76 +1,81 @@
 use super::{
-    as_raw, as_raw_mut, ossl_init, EpvPkey, GetFd, SslMode, TcpWrapper, TlsFlags, VerifyCertExtension, OPENSSL_EX_DATA_IDX
+    as_raw, as_raw_mut, ossl_init, verify_certificate_default, EpvPkey, GetFd, GetFdDumpImpl,
+    SslMode, TcpWrapper, OPENSSL_EX_DATA_IDX,
 };
-use crate::cert::dice::cbor::parse_evidence_buffer_with_tag;
-use crate::crypto::{DefaultCrypto, HashAlgo};
-use crate::errors::*;
-use crate::tee::{AutoAttester, GenericVerifier};
-use crate::transport::{GenericSecureTransPortRead, GenericSecureTransPortWrite};
-use crate::{crypto::AsymmetricPrivateKey, transport::GenericSecureTransPort};
+use crate::{
+    cert::{create::CertBuilder, dice::cbor::parse_evidence_buffer_with_tag},
+    crypto::{AsymmetricPrivateKey, DefaultCrypto, HashAlgo},
+    errors::*,
+    tee::{sgx_dcap::evidence, AutoAttester, GenericVerifier},
+    transport::{GenericSecureTransPort, GenericSecureTransPortRead, GenericSecureTransPortWrite},
+};
 use lazy_static::lazy_static;
+use log::{debug, error};
 use maybe_async::maybe_async;
 use openssl_sys::*;
 use pkcs8::EncodePrivateKey;
-use std::cell::Cell;
-use std::ffi::c_int;
-use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
-use std::os::fd::AsRawFd;
-use std::ptr;
-use std::sync::{Arc, Mutex};
+use std::{
+    cell::Cell,
+    ffi::c_int,
+    io::{Read, Write},
+    net::{TcpStream, ToSocketAddrs},
+    os::fd::AsRawFd,
+    ptr,
+    sync::{Arc, Mutex},
+};
 
 //TODO: use typestate only impl `VerifyCertExtension` if needed
-struct Server {
+pub struct Server {
     ctx: Option<*mut SSL_CTX>,
     ssl_session: Option<*mut SSL>,
-    conf_flag: TlsFlags,
-    verify: SSL_verify_cb,
+    verify_callback: SSL_verify_cb,
     stream: Box<dyn GetFd>,
-}
-
-impl VerifyCertExtension for Server {
-    fn verify_certificate_extension(
-        &mut self,
-        pubkey: Vec<u8>,
-        evidence: Vec<u8>,
-        endorsement: Vec<u8>,
-    ) -> Result<()> {
-        Ok(())
-    }
 }
 
 // TODO: use typestate design pattern?
-struct TlsServerBuilder {
+pub struct TlsServerBuilder {
     verify: SSL_verify_cb,
-    conf_flag: Option<TlsFlags>,
     stream: Box<dyn GetFd>,
+    verify_peer: bool,
 }
 
 impl TlsServerBuilder {
-    fn build(self) -> Result<Server> {
+    pub fn build(self) -> Result<Server> {
         let mut s = Server {
             ctx: None,
             ssl_session: None,
-            verify: self.verify,
-            conf_flag: self.conf_flag.unwrap_or_default(),
+            verify_callback: if self.verify_peer {
+                if self.verify.is_some() {
+                    self.verify
+                } else {
+                    Some(verify_certificate_default)
+                }
+            } else {
+                None
+            },
             stream: self.stream,
         };
         s.init()?;
         Ok(s)
     }
-    fn with_verify(mut self, verify: SSL_verify_cb) -> Self {
+    pub fn new() -> Self {
+        Self {
+            verify: None,
+            stream: Box::new(GetFdDumpImpl),
+            verify_peer: false,
+        }
+    }
+    pub fn with_verify(mut self, verify: SSL_verify_cb) -> Self {
         self.verify = verify;
         self
     }
-    fn with_conf_flag(mut self, conf_flag: TlsFlags) -> Self {
-        self.conf_flag = Some(conf_flag);
+    pub fn with_verify_peer(mut self, verify_peer: bool) -> Self {
+        self.verify_peer = verify_peer;
         self
     }
-    fn with_tcp_stream<A: ToSocketAddrs>(mut self, addr: A) -> Result<Self> {
-        let stream = TcpStream::connect(addr)
-            .map_err(|err| Error::kind(ErrorKind::OsslClientConnectFail))?;
+    pub fn with_tcp_stream(mut self, stream: TcpStream) -> Self {
         self.stream = Box::new(TcpWrapper(stream));
-        Ok(self)
+        self
     }
 }
 
@@ -132,44 +137,39 @@ impl GenericSecureTransPortRead for Server {
 #[maybe_async]
 impl GenericSecureTransPort for Server {
     async fn negotiate(&mut self) -> Result<()> {
-        let ctx = as_raw_mut(
-            self.ctx
-                .as_mut()
-                .ok_or(Error::kind(ErrorKind::OsslCtxUninitialize))?,
-        );
-        unsafe {
-            if self.verify.is_some() {
-                let mut mode = SslMode::SSL_VERIFY_NONE;
-                if self.conf_flag.contains(TlsFlags::MUTAL) {
-                    mode |= SslMode::SSL_VERIFY_PEER | SslMode::SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
-                }
-                SSL_CTX_set_verify(ctx, mode.bits(), self.verify);
+        let ctx = self
+            .ctx
+            .ok_or(Error::kind(ErrorKind::OsslCtxUninitialize))?;
+        if self.verify_callback.is_some() {
+            let mut mode = SslMode::SSL_VERIFY_NONE;
+            mode |= SslMode::SSL_VERIFY_PEER | SslMode::SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
+            unsafe {
+                SSL_CTX_set_verify(ctx, mode.bits(), self.verify_callback);
             }
         }
-        let session = unsafe {
-            let session = SSL_new(ctx);
-            if session.is_null() {
-                return Err(Error::kind(ErrorKind::OsslNoMem));
-            }
-            session
-        };
+        let session = unsafe { SSL_new(ctx) };
+        if session.is_null() {
+            return Err(Error::kind(ErrorKind::OsslNoMem));
+        }
         unsafe {
-            let cert_store = SSL_CTX_get_cert_store(self.ctx.unwrap());
             X509_STORE_set_ex_data(
-                cert_store,
+                SSL_CTX_get_cert_store(ctx),
                 OPENSSL_EX_DATA_IDX.lock().unwrap().get(),
                 as_raw_mut(self),
             );
-            let res = SSL_set_fd(session, self.stream.get_fd());
-            if res != 1 {
-                return Err(Error::kind(ErrorKind::OsslSetFdFail));
-            }
         }
-        let err;
+        let res = unsafe { SSL_set_fd(session, self.stream.get_fd()) };
+        if res != 1 {
+            return Err(Error::kind(ErrorKind::OsslSetFdFail));
+        }
         unsafe {
-            err = SSL_accept(session);
+            ERR_clear_error();
         }
+        let err = unsafe { SSL_accept(session) };
         if err != 1 {
+            error!("failed to negotiate {}, SSL_get_error(): {}", err, unsafe {
+                SSL_get_error(session, err)
+            });
             return Err(Error::kind(ErrorKind::OsslServerNegotiationFail));
         }
         self.ssl_session = Some(session);
@@ -185,10 +185,16 @@ impl Server {
             return Err(Error::kind(ErrorKind::OsslCtxInitializeFail));
         }
         self.ctx = Some(ctx);
+        let privkey = DefaultCrypto::gen_private_key(crate::crypto::AsymmetricAlgo::Rsa2048)?;
+        self.use_privkey(&privkey)?;
+        let cert = CertBuilder::new(AutoAttester::new(), HashAlgo::Sha256)
+            .build_with_private_key(&privkey)?
+            .cert_to_der()?;
+        self.use_cert(&cert)?;
         Ok(())
     }
 
-    pub fn use_privkey(&mut self, privkey: AsymmetricPrivateKey) -> Result<()> {
+    pub fn use_privkey(&mut self, privkey: &AsymmetricPrivateKey) -> Result<()> {
         let pkey;
         let epkey: ::libc::c_int;
         match privkey {
@@ -202,7 +208,6 @@ impl Server {
                 pkey = key.to_pkcs8_der()?;
                 epkey = EpvPkey::EC.bits();
             }
-            _ => return Err(Error::kind(ErrorKind::OsslUnsupportedPkeyAlgo)),
         }
         let ctx = self
             .ctx
@@ -247,7 +252,7 @@ mod tests {
         errors::*,
         tee::AutoAttester,
         transport::{
-            tls::{as_raw_mut, GetFdDumpImpl, TlsFlags},
+            tls::{as_raw_mut, GetFdDumpImpl},
             GenericSecureTransPortWrite,
         },
     };
@@ -260,11 +265,11 @@ mod tests {
         let mut s = Server {
             ctx: None,
             ssl_session: None,
-            verify: None,
-            conf_flag: TlsFlags::default(),
+            verify_callback: None,
             stream: Box::new(GetFdDumpImpl),
         };
         s.init()?;
+        s.shutdown()?;
         Ok(())
     }
     #[test]
@@ -272,8 +277,7 @@ mod tests {
         let mut s = Server {
             ctx: None,
             ssl_session: None,
-            verify: None,
-            conf_flag: TlsFlags::default(),
+            verify_callback: None,
             stream: Box::new(GetFdDumpImpl),
         };
         s.init()?;
@@ -313,15 +317,14 @@ mod tests {
         let mut s = Server {
             ctx: None,
             ssl_session: None,
-            verify: None,
-            conf_flag: TlsFlags::default(),
+            verify_callback: None,
             stream: Box::new(GetFdDumpImpl),
         };
         s.init()?;
         let privkey = DefaultCrypto::gen_private_key(AsymmetricAlgo::Rsa2048)?;
         let binding = privkey.to_pkcs8_pem()?;
         let privpem = binding.as_bytes();
-        s.use_privkey(privkey)?;
+        s.use_privkey(&privkey)?;
         let now = ossl_get_privkey(&mut s);
         assert_eq!(privpem, now.as_slice());
         s.shutdown()?;
@@ -333,15 +336,15 @@ mod tests {
         let mut s = Server {
             ctx: None,
             ssl_session: None,
-            verify: None,
-            conf_flag: TlsFlags::default(),
+            verify_callback: None,
             stream: Box::new(GetFdDumpImpl),
         };
         s.init()?;
         let privkey = DefaultCrypto::gen_private_key(AsymmetricAlgo::Rsa2048)?;
-        let cert = CertBuilder::new(AutoAttester::new(), HashAlgo::Sha256)
-            .build_with_private_key(&privkey)?
-            .cert_to_der()?;
+        let bundle = CertBuilder::new(AutoAttester::new(), HashAlgo::Sha256)
+            .build_with_private_key(&privkey)?;
+        let cert = bundle.cert_to_der()?;
+        println!("cert.pem: {}", bundle.cert_to_pem()?);
         s.use_cert(&cert)?;
         let raw_cert = unsafe { SSL_CTX_get0_certificate(s.ctx.unwrap()) };
         let mut raw_ptr = ptr::null_mut::<u8>();

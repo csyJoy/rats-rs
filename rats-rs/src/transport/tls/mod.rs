@@ -1,30 +1,32 @@
-use bitflags::bitflags;
-use lazy_static::lazy_static;
-use libc::c_int;
-use openssl_sys::*;
-use pkcs8::ObjectIdentifier;
-use std::cell::Cell;
-use std::net::TcpStream;
-use std::os::fd::AsRawFd;
-use std::ptr;
-use std::slice;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::Once;
-
-use crate::cert::dice::extensions::OID_TCG_DICE_ENDORSEMENT_MANIFEST;
-use crate::cert::dice::extensions::OID_TCG_DICE_TAGGED_EVIDENCE;
-use crate::cert::verify::verify_cert_der;
-use crate::cert::verify::CertVerifier;
-use crate::cert::verify::VerifiyPolicy;
-use crate::cert::verify::VerifiyPolicy::Contains;
-use crate::cert::verify::VerifyPolicyOutput;
-use crate::tee::claims::Claims;
+mod client;
+mod server;
 
 use super::{Error, ErrorKind, Result};
-
-pub mod client;
-pub mod server;
+use crate::{
+    cert::{
+        dice::extensions::{OID_TCG_DICE_ENDORSEMENT_MANIFEST, OID_TCG_DICE_TAGGED_EVIDENCE},
+        verify::{
+            verify_cert_der, CertVerifier, VerifiyPolicy, VerifiyPolicy::Contains,
+            VerifyPolicyOutput,
+        },
+    },
+    tee::claims::Claims,
+};
+use bitflags::bitflags;
+pub use client::{Client, TlsClientBuilder};
+use lazy_static::lazy_static;
+use libc::c_int;
+use log::{debug, error};
+use openssl_sys::*;
+use pkcs8::ObjectIdentifier;
+pub use server::{Server, TlsServerBuilder};
+use std::{
+    cell::Cell,
+    net::TcpStream,
+    os::fd::AsRawFd,
+    ptr, slice,
+    sync::{Arc, Mutex, Once},
+};
 
 lazy_static! {
     static ref OPENSSL_EX_DATA_IDX: Arc<Mutex<Cell<i32>>> = unsafe {
@@ -48,7 +50,7 @@ trait GetFd {
 struct GetFdDumpImpl;
 
 impl GetFd for GetFdDumpImpl {
-    fn get_fd(&self) -> i32{
+    fn get_fd(&self) -> i32 {
         0
     }
 }
@@ -73,35 +75,12 @@ pub fn as_raw<F, T>(p: &F) -> *const T {
 
 bitflags! {
     #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    struct TlsFlags : u64 {
-        const MUTAL = 0x0000_0001;
-        const SERVER = 0x0000_0002;
-        const PROVIDE_ENDORSEMENTS = 0x0000_0004;
-        const ATTESTER_ENFORCED = 0x0001_0000;
-        const VERIFIER_ENFORCED = 0x0002_0000;
-    }
-
-    #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     struct SslMode : i32 {
         const SSL_VERIFY_NONE                 = 0x00;
         const SSL_VERIFY_PEER                 = 0x01;
         const SSL_VERIFY_FAIL_IF_NO_PEER_CERT = 0x02;
         const SSL_VERIFY_CLIENT_ONCE          = 0x04;
         const SSL_VERIFY_POST_HANDSHAKE       = 0x08;
-    }
-
-    #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    struct TlsErr : i32 {
-        const NONE = (1 << 28);
-        const NO_MEM = (1 << 28) + 1;
-        const NOT_FOUND = (1 << 28) + 2;
-        const INVALID = (1 << 28) + 3;
-        const TRANSMIT = (1 << 28) + 4;
-        const RECEIVE = (1 << 28) + 5;
-        const UNSUPPORTED_QUOTE = (1 << 28) + 6;
-        const PRIV_KEY = (1 << 28) + 7;
-        const CERT = (1 << 28) + 8;
-        const UNKNOWN = (1 << 28) + 9;
     }
 
     #[derive(Default, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -138,31 +117,22 @@ pub fn ossl_init() -> Result<()> {
     Ok(())
 }
 
-trait VerifyCertExtension {
-    fn verify_certificate_extension(
-        &mut self,
-        pubkey: Vec<u8>,
-        evidence: Vec<u8>,
-        endorsement: Vec<u8>,
-    ) -> Result<()>;
-}
-
-extern "C" fn verify_certificate_default<T: VerifyCertExtension>(
+extern "C" fn verify_certificate_default(
     preverify_ok: libc::c_int,
     ctx: *mut X509_STORE_CTX,
 ) -> libc::c_int {
     if preverify_ok == 0 {
+        debug!("preverify_ok is 0");
         let err = unsafe { X509_STORE_CTX_get_error(ctx) };
-        if err == X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT {
-            return 1;
+        if err != X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT {
+            error!("Failed on pre-verification due to {}\n", err);
+            if err == X509_V_ERR_CERT_NOT_YET_VALID {
+                error!(
+                    "Please ensure check the time-keeping is consistent between client and server\n"
+                );
+            }
+            return 0;
         }
-        error!("Failed on pre-verification due to {}\n", err);
-        if err == X509_V_ERR_CERT_NOT_YET_VALID {
-            error!(
-                "Please ensure check the time-keeping is consistent between client and server\n"
-            );
-        }
-        return 0;
     }
     let raw_cert = unsafe { X509_STORE_CTX_get_current_cert(ctx) };
     let mut raw_ptr = ptr::null_mut::<u8>();
@@ -184,42 +154,6 @@ extern "C" fn verify_certificate_default<T: VerifyCertExtension>(
     }
 }
 
-fn find_extension_from_cert(
-    cert: *mut X509,
-    oid: ObjectIdentifier,
-    optional: bool,
-) -> Result<Vec<u8>> {
-    let extensions = unsafe {
-        let ptr = X509_get0_extensions(cert);
-        if ptr.is_null() {
-            return Err(Error::kind(ErrorKind::OsslGetExtensionFail));
-        }
-        ptr
-    };
-    let extensions_num = unsafe { OPENSSL_sk_num(extensions as *const OPENSSL_STACK) };
-    for i in 0..extensions_num {
-        let mut oid_buf = [0 as libc::c_char; 128];
-        unsafe {
-            let ext = OPENSSL_sk_value(extensions as *const OPENSSL_STACK, i) as _;
-            let obj = X509_EXTENSION_get_object(ext);
-            OBJ_obj2txt(oid_buf.as_mut_ptr(), 128, obj, 1);
-            let cur_oid =
-                ObjectIdentifier::try_from(&*(oid_buf.as_ref() as *const _ as *const [u8]))
-                    .map_err(|_| Error::kind(ErrorKind::OsslOIDErr))?;
-            if cur_oid == oid {
-                let str = X509_EXTENSION_get_data(ext);
-                let res = slice::from_raw_parts_mut((*str).data, (*str).length as usize);
-                return Ok(res.into());
-            }
-        }
-    }
-    if optional {
-        Ok(vec![])
-    } else {
-        Err(Error::kind(ErrorKind::OsslFindX509ExFail))
-    }
-}
-
 #[cfg(test)]
 mod test {
     use super::ossl_init;
@@ -230,7 +164,4 @@ mod test {
         ossl_init()?;
         Ok(())
     }
-
-    #[test]
-    fn test_find_extension_from_cert() {}
 }
