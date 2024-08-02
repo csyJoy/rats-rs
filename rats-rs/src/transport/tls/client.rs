@@ -211,7 +211,7 @@ impl GenericSecureTransPort for Client {
 impl Client {
     pub fn init(&mut self) -> Result<()> {
         ossl_init()?;
-        let ctx = unsafe { openssl_sys::SSL_CTX_new(openssl_sys::TLS_server_method()) };
+        let ctx = unsafe { SSL_CTX_new(TLS_client_method()) };
         if ctx.is_null() {
             return Err(Error::kind(ErrorKind::OsslCtxInitializeFail));
         }
