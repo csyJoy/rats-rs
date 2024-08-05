@@ -26,7 +26,13 @@ pub(crate) fn generate_and_sign_dice_cert(
     let validity = Validity::from_now(Duration::new(60, 0))
         .kind(ErrorKind::GenCertError)
         .context("bad validity value")?;
-    let profile = Profile::Root;
+    let profile = Profile::Leaf {
+        issuer: Name::from_str(subject)
+            .kind(ErrorKind::GenCertError)
+            .with_context(|| format!("bad issuer value `{}`", subject))?,
+        enable_key_agreement: false,
+        enable_key_encipherment: false,
+    };
     let subject = Name::from_str(subject)
         .kind(ErrorKind::GenCertError)
         .with_context(|| format!("bad subject value `{}`", subject))?;
