@@ -252,7 +252,7 @@ mod tests {
         errors::*,
         tee::AutoAttester,
         transport::{
-            tls::{as_raw_mut, GetFdDumpImpl},
+            tls::{as_raw_mut, ossl_init, GetFdDumpImpl},
             GenericSecureTransPortWrite,
         },
     };
@@ -320,7 +320,12 @@ mod tests {
             verify_callback: None,
             stream: Box::new(GetFdDumpImpl),
         };
-        s.init()?;
+        ossl_init()?;
+        let ctx = unsafe { SSL_CTX_new(TLS_server_method()) };
+        if ctx.is_null() {
+            return Err(Error::kind(ErrorKind::OsslCtxInitializeFail));
+        }
+        s.ctx = Some(ctx);
         let privkey = DefaultCrypto::gen_private_key(AsymmetricAlgo::Rsa2048)?;
         let binding = privkey.to_pkcs8_pem()?;
         let privpem = binding.as_bytes();
@@ -339,7 +344,12 @@ mod tests {
             verify_callback: None,
             stream: Box::new(GetFdDumpImpl),
         };
-        s.init()?;
+        ossl_init()?;
+        let ctx = unsafe { SSL_CTX_new(TLS_server_method()) };
+        if ctx.is_null() {
+            return Err(Error::kind(ErrorKind::OsslCtxInitializeFail));
+        }
+        s.ctx = Some(ctx);
         let privkey = DefaultCrypto::gen_private_key(AsymmetricAlgo::Rsa2048)?;
         let bundle = CertBuilder::new(AutoAttester::new(), HashAlgo::Sha256)
             .build_with_private_key(&privkey)?;
