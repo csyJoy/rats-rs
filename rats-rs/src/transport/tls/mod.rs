@@ -124,15 +124,16 @@ extern "C" fn verify_certificate_default(
     if preverify_ok == 0 {
         debug!("preverify_ok is 0");
         let err = unsafe { X509_STORE_CTX_get_error(ctx) };
-        if err != X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT {
-            error!("Failed on pre-verification due to {}\n", err);
-            if err == X509_V_ERR_CERT_NOT_YET_VALID {
-                error!(
-                    "Please ensure check the time-keeping is consistent between client and server\n"
-                );
-            }
-            return 0;
+        if err == X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT {
+            return 1;
         }
+        error!("Failed on pre-verification due to {}\n", err);
+        if err == X509_V_ERR_CERT_NOT_YET_VALID {
+            error!(
+                "Please ensure check the time-keeping is consistent between client and server\n"
+            );
+        }
+        return 0;
     }
     let raw_cert = unsafe { X509_STORE_CTX_get_current_cert(ctx) };
     let mut raw_ptr = ptr::null_mut::<u8>();

@@ -3,10 +3,16 @@ use super::{
     SslMode, TcpWrapper, OPENSSL_EX_DATA_IDX,
 };
 use crate::{
-    cert::dice::cbor::{parse_evidence_buffer_with_tag, OCBR_TAG_EVIDENCE_INTEL_TEE_QUOTE},
+    cert::{
+        create::CertBuilder,
+        dice::cbor::{parse_evidence_buffer_with_tag, OCBR_TAG_EVIDENCE_INTEL_TEE_QUOTE},
+    },
     crypto::{AsymmetricPrivateKey, DefaultCrypto, HashAlgo},
     errors::*,
-    tee::{sgx_dcap::evidence, AutoEvidence, AutoVerifier, GenericEvidence, GenericVerifier},
+    tee::{
+        sgx_dcap::evidence, AutoAttester, AutoEvidence, AutoVerifier, GenericEvidence,
+        GenericVerifier,
+    },
     transport::{GenericSecureTransPort, GenericSecureTransPortRead, GenericSecureTransPortWrite},
 };
 use lazy_static::lazy_static;
@@ -28,11 +34,13 @@ pub struct Client {
     ssl_session: Option<*mut SSL>,
     verify_callback: SSL_verify_cb,
     stream: Box<dyn GetFd>,
+    attest_self: bool,
 }
 
 pub struct TlsClientBuilder {
     verify: SSL_verify_cb,
     stream: Box<dyn GetFd>,
+    attest_self: bool,
 }
 
 impl TlsClientBuilder {
@@ -42,6 +50,7 @@ impl TlsClientBuilder {
             ssl_session: None,
             verify_callback: Some(self.verify.unwrap_or(verify_certificate_default)),
             stream: self.stream,
+            attest_self: self.attest_self,
         };
         c.init()?;
         Ok(c)
@@ -54,10 +63,15 @@ impl TlsClientBuilder {
         self.stream = Box::new(TcpWrapper(stream));
         self
     }
+    pub fn with_attest_self(mut self, attest_self: bool) -> Self {
+        self.attest_self = attest_self;
+        self
+    }
     pub fn new() -> Self {
         Self {
             verify: None,
             stream: Box::new(GetFdDumpImpl {}),
+            attest_self: false,
         }
     }
 }
@@ -167,9 +181,17 @@ impl Client {
             return Err(Error::kind(ErrorKind::OsslCtxInitializeFail));
         }
         self.ctx = Some(ctx);
+        if self.attest_self {
+            let privkey = DefaultCrypto::gen_private_key(crate::crypto::AsymmetricAlgo::Rsa2048)?;
+            self.use_privkey(&privkey)?;
+            let cert = CertBuilder::new(AutoAttester::new(), HashAlgo::Sha256)
+                .build_with_private_key(&privkey)?
+                .cert_to_der()?;
+            self.use_cert(&cert)?;
+        }
         Ok(())
     }
-    pub fn use_privkey(&mut self, privkey: AsymmetricPrivateKey) -> Result<()> {
+    pub fn use_privkey(&mut self, privkey: &AsymmetricPrivateKey) -> Result<()> {
         let pkey;
         let epkey: ::libc::c_int;
         match privkey {
@@ -238,6 +260,7 @@ mod tests {
             ssl_session: None,
             verify_callback: None,
             stream: Box::new(GetFdDumpImpl),
+            attest_self: false,
         };
         c.init()?;
         Ok(())
@@ -250,6 +273,7 @@ mod tests {
             ssl_session: None,
             verify_callback: None,
             stream: Box::new(GetFdDumpImpl),
+            attest_self: false,
         };
         c.init()?;
         c.shutdown()?;
@@ -290,12 +314,13 @@ mod tests {
             ssl_session: None,
             verify_callback: None,
             stream: Box::new(GetFdDumpImpl),
+            attest_self: false,
         };
         c.init()?;
         let privkey = DefaultCrypto::gen_private_key(AsymmetricAlgo::Rsa2048)?;
         let binding = privkey.to_pkcs8_pem()?;
         let privpem = binding.as_bytes();
-        c.use_privkey(privkey)?;
+        c.use_privkey(&privkey)?;
         let now = ossl_get_privkey(&mut c);
         assert_eq!(privpem, now);
         c.shutdown()?;
@@ -309,6 +334,7 @@ mod tests {
             ssl_session: None,
             verify_callback: None,
             stream: Box::new(GetFdDumpImpl),
+            attest_self: false,
         };
         c.init()?;
         let privkey = DefaultCrypto::gen_private_key(AsymmetricAlgo::Rsa2048)?;
